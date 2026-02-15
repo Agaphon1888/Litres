@@ -1,103 +1,122 @@
+# -*- coding: utf-8 -*-
+"""
+Скрипт для скачивания страниц книги с сайта litres.ru.
+Перед запуском установите библиотеку requests:
+    pip install requests
+"""
+
 import os
 import time
 import requests
 from urllib.parse import urlencode
 
-# --- НАСТРОЙКИ (измените при необходимости) ---
-FILE_ID = "26600058"           # ID вашей книги из ссылки
-OUTPUT_DIR = "downloaded_pages" # Папка для сохранения
-DELAY = 2                       # Задержка между запросами (сек)
-TIMEOUT = 15                    # Таймаут запроса
-START_PAGE = 0                   # С какой страницы начать (если нужно продолжить)
-# ---------------------------------------------
+# =========================================================
+# НАСТРОЙКИ (заполните своими данными из ссылки на книгу)
+# =========================================================
 
-BASE_URL = "https://www.litres.ru/pages/get_pdf_page/"
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+# Эти параметры нужно взять из адресной строки вашей книги
+FILE_ID   = "26600058"      # параметр file
+USER_ID   = "145468552"     # параметр user
+UUID      = "3eba580c-edd4-11e6-9b47-0cc47a5203ba"  # параметр uuid
+ART_ID    = "22872570"      # параметр art (можно не указывать, но лучше добавить)
+# ART_TYPE = "4"            # параметр art_type, если есть (в вашей ссылке он есть, но может не понадобиться)
+
+# Папка, куда сохранять страницы
+OUTPUT_DIR = "downloaded_pages"
+
+# Задержка между запросами (секунды) – чтобы не нагружать сервер
+DELAY = 2
+
+# Сколько раз подряд можно получить ошибку, прежде чем считать книгу законченной
+MAX_CONSECUTIVE_FAILS = 5
+
+# =========================================================
+# ОСНОВНОЙ КОД (лучше не менять)
+# =========================================================
+
+# Базовые параметры, которые будут добавлены к каждому запросу
+BASE_PARAMS = {
+    'file': FILE_ID,
+    'user': USER_ID,
+    'uuid': UUID,
+    'art': ART_ID,
+    # 'art_type': ART_TYPE,  # раскомментируйте, если нужно
 }
 
-def get_page_info(page_num):
-    """Определяет формат страницы (jpg/gif) и возвращает URL и расширение."""
-    # Сначала пробуем как jpg (наиболее частый случай)
-    params_jpg = {
-        'file': FILE_ID,
+# Заголовки, чтобы имитировать браузер
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Referer': 'https://www.litres.ru/',
+}
+
+def get_page_url(page_num, fmt):
+    """Формирует полный URL для заданной страницы и формата (jpg/gif)."""
+    params = BASE_PARAMS.copy()
+    params.update({
         'page': page_num,
         'rt': 'w1900',
-        'ft': 'jpg'
-    }
-    url_jpg = f"{BASE_URL}?{urlencode(params_jpg)}"
-    
-    try:
-        # Делаем легкий HEAD-запрос, чтобы проверить тип контента без скачивания
-        response = requests.head(url_jpg, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
-        content_type = response.headers.get('Content-Type', '')
-        
-        if 'image/jpeg' in content_type or 'image/jpg' in content_type:
-            return url_jpg, 'jpg'
-        elif 'image/gif' in content_type:
-            # Если вдруг jpg-запрос вернул gif (маловероятно)
-            return url_jpg, 'gif'
-        else:
-            # Пробуем как gif
-            params_gif = params_jpg.copy()
-            params_gif['ft'] = 'gif'
-            url_gif = f"{BASE_URL}?{urlencode(params_gif)}"
-            response_gif = requests.head(url_gif, headers=HEADERS, timeout=TIMEOUT)
-            content_type_gif = response_gif.headers.get('Content-Type', '')
-            
-            if 'image/gif' in content_type_gif:
-                return url_gif, 'gif'
-            else:
-                # Ни тот, ни другой формат не подошёл — возможно, страницы закончились
-                return None, None
-                
-    except requests.exceptions.RequestException as e:
-        print(f"Ошибка при проверке страницы {page_num}: {e}")
-        return None, None
+        'ft': fmt,
+    })
+    return f"https://www.litres.ru/pages/get_pdf_page/?{urlencode(params)}"
 
-def download_page(url, page_num, ext):
-    """Скачивает страницу и сохраняет в файл."""
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=TIMEOUT, stream=True)
-        response.raise_for_status()
-        
-        filename = os.path.join(OUTPUT_DIR, f"page_{page_num:03d}.{ext}")
-        with open(filename, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        print(f"Страница {page_num} сохранена как {filename}")
-        return True
-    except Exception as e:
-        print(f"Не удалось скачать страницу {page_num}: {e}")
-        return False
+def try_download(page_num):
+    """
+    Пытается скачать страницу page_num.
+    Сначала пробует формат jpg, если не получается – gif.
+    Возвращает True, если страница успешно сохранена.
+    """
+    for fmt in ('jpg', 'gif'):
+        url = get_page_url(page_num, fmt)
+        try:
+            # Сначала делаем быстрый HEAD-запрос, чтобы проверить доступность и тип
+            resp_head = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
+            if resp_head.status_code != 200:
+                continue  # страница не доступна, пробуем другой формат
+
+            content_type = resp_head.headers.get('Content-Type', '')
+            if fmt == 'jpg' and 'image/jpeg' not in content_type and 'image/jpg' not in content_type:
+                continue  # сервер вернул не картинку, пробуем gif
+            if fmt == 'gif' and 'image/gif' not in content_type:
+                continue  # сервер вернул не gif
+
+            # Если дошли сюда – формат подходит, скачиваем
+            resp_get = requests.get(url, headers=HEADERS, timeout=30, stream=True)
+            resp_get.raise_for_status()
+
+            # Сохраняем в файл
+            filename = os.path.join(OUTPUT_DIR, f"page_{page_num:03d}.{fmt}")
+            with open(filename, 'wb') as f:
+                for chunk in resp_get.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"Страница {page_num} сохранена как {filename}")
+            return True
+
+        except Exception as e:
+            print(f"Ошибка при попытке {fmt} для страницы {page_num}: {e}")
+            continue
+
+    print(f"Не удалось скачать страницу {page_num} ни в одном формате.")
+    return False
 
 def main():
-    # Создаём папку для сохранения
+    # Создаём папку, если её нет
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    page = START_PAGE
-    consecutive_fails = 0
-    MAX_CONSECUTIVE_FAILS = 5  # Если 5 страниц подряд не найдено, считаем, что книга закончилась
-    
-    print("Начинаем проверку и скачивание страниц...")
-    
-    while consecutive_fails < MAX_CONSECUTIVE_FAILS:
-        print(f"Проверяем страницу {page}...")
-        url, ext = get_page_info(page)
-        
-        if url and ext:
-            if download_page(url, page, ext):
-                consecutive_fails = 0  # сбрасываем счётчик ошибок
-            else:
-                consecutive_fails += 1
+
+    page = 0
+    fails = 0
+
+    print("Начинаем скачивание...")
+    while fails < MAX_CONSECUTIVE_FAILS:
+        print(f"Пробуем страницу {page}...")
+        success = try_download(page)
+        if success:
+            fails = 0
         else:
-            print(f"Страница {page} не найдена или имеет неизвестный формат.")
-            consecutive_fails += 1
-        
+            fails += 1
         page += 1
-        time.sleep(DELAY)  # вежливая задержка
-    
-    print(f"\nСкачивание завершено. Всего обработано страниц: {page - START_PAGE}")
+        time.sleep(DELAY)
+
+    print(f"Скачивание завершено. Всего обработано страниц: {page - fails}")
 
 if __name__ == "__main__":
     main()

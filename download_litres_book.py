@@ -5,35 +5,20 @@ import requests
 from urllib.parse import urlencode
 
 # =========================================================
-#    НАСТРОЙКИ – ЗАПОЛНИТЕ ИХ ВНИМАТЕЛЬНО
+#    НАСТРОЙКИ – ЗАПОЛНИТЕ ИХ (уже заполнены вами)
 # =========================================================
-
-# --- 1. Параметры книги (из ссылки на неё) ---
 FILE_ID   = "26600058"
 USER_ID   = "145468552"
 UUID      = "3eba580c-edd4-11e6-9b47-0cc47a5203ba"
 ART_ID    = "22872570"
 
-# --- 2. Куки (их нужно скопировать из браузера) ---
-#    Инструкция ниже.
-COOKIE_STRING = "вставьте_сюда_все_куки_из_браузера"
-
-# --- 3. Папка для сохранения и задержка ---
 OUTPUT_DIR = "downloaded_pages"
-DELAY = 2                     # секунд между запросами
-MAX_CONSECUTIVE_FAILS = 5     # сколько ошибок подряд терпим
+DELAY = 2
+MAX_CONSECUTIVE_FAILS = 5
 
 # =========================================================
-#           КОД (лучше не трогать)
+#           НОВЫЙ КОД С СЕССИЕЙ
 # =========================================================
-
-# Преобразуем строку кук в словарь
-cookies = {}
-if COOKIE_STRING and COOKIE_STRING != "вставьте_сюда_все_куки_из_браузера":
-    for item in COOKIE_STRING.split('; '):
-        if '=' in item:
-            key, value = item.split('=', 1)
-            cookies[key] = value
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -52,49 +37,68 @@ def get_page_url(page_num, fmt):
     params.update({'page': page_num, 'rt': 'w1900', 'ft': fmt})
     return f"https://www.litres.ru/pages/get_pdf_page/?{urlencode(params)}"
 
-def try_download(page_num):
-    for fmt in ('jpg', 'gif'):
-        url = get_page_url(page_num, fmt)
-        try:
-            # HEAD-запрос для проверки
-            resp_head = requests.head(url, headers=HEADERS, cookies=cookies, timeout=10, allow_redirects=True)
-            if resp_head.status_code != 200:
-                continue
-            content_type = resp_head.headers.get('Content-Type', '')
-            if fmt == 'jpg' and 'image/jpeg' not in content_type:
-                continue
-            if fmt == 'gif' and 'image/gif' not in content_type:
-                continue
-
-            # Скачиваем
-            resp_get = requests.get(url, headers=HEADERS, cookies=cookies, timeout=30, stream=True)
-            resp_get.raise_for_status()
-            filename = os.path.join(OUTPUT_DIR, f"page_{page_num:03d}.{fmt}")
-            with open(filename, 'wb') as f:
-                for chunk in resp_get.iter_content(8192):
-                    f.write(chunk)
-            print(f"Страница {page_num} -> {filename}")
-            return True
-        except Exception as e:
-            print(f"Ошибка {fmt} для стр.{page_num}: {e}")
-            continue
-    print(f"Не удалось скачать стр.{page_num}")
-    return False
-
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Создаём сессию – она будет автоматически сохранять и отправлять куки
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # Сначала заходим на любую страницу сайта, чтобы получить стартовые куки
+    print("Получаем начальные куки...")
+    try:
+        # Заходим на главную litres.ru (или на страницу книги)
+        session.get("https://www.litres.ru", timeout=10)
+        print("Куки получены.")
+    except Exception as e:
+        print(f"Не удалось получить начальные куки: {e}")
+        # Продолжаем, возможно, куки и не нужны
+
     page = 0
     fails = 0
     print("Начинаем скачивание...")
+
     while fails < MAX_CONSECUTIVE_FAILS:
         print(f"Пробуем страницу {page}...")
-        if try_download(page):
+        success = False
+
+        for fmt in ('jpg', 'gif'):
+            url = get_page_url(page, fmt)
+            try:
+                # Используем сессию для запроса
+                resp = session.get(url, timeout=30, stream=True)
+                if resp.status_code != 200:
+                    continue
+
+                content_type = resp.headers.get('Content-Type', '')
+                if fmt == 'jpg' and 'image/jpeg' not in content_type:
+                    continue
+                if fmt == 'gif' and 'image/gif' not in content_type:
+                    continue
+
+                # Если дошли сюда – формат правильный, сохраняем
+                filename = os.path.join(OUTPUT_DIR, f"page_{page:03d}.{fmt}")
+                with open(filename, 'wb') as f:
+                    for chunk in resp.iter_content(8192):
+                        f.write(chunk)
+                print(f"  -> Страница {page} сохранена как {filename}")
+                success = True
+                break  # выходим из цикла по форматам
+
+            except Exception as e:
+                print(f"  Ошибка {fmt} для стр.{page}: {e}")
+                continue
+
+        if success:
             fails = 0
         else:
+            print(f"  Не удалось скачать стр.{page}")
             fails += 1
+
         page += 1
         time.sleep(DELAY)
-    print("Готово. Всего скачано страниц:", page - fails)
+
+    print(f"Готово. Всего скачано страниц: {page - fails}")
 
 if __name__ == "__main__":
     main()
